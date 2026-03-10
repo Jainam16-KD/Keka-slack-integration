@@ -86,7 +86,7 @@ if (config.app.enableDebugEndpoints) {
 
   app.post("/keka/create-leave", async (req, res) => {
     try {
-      const { employeeId, leaveTypeId, fromDate, toDate, reason } = req.body;
+      const { employeeId, leaveTypeId, fromDate, toDate, reason, note, fromSession, toSession } = req.body;
 
       if (!employeeId || !leaveTypeId || !fromDate || !toDate) {
         return res.status(400).json({
@@ -101,6 +101,9 @@ if (config.app.enableDebugEndpoints) {
         fromDate,
         toDate,
         reason,
+        note,
+        fromSession,
+        toSession,
       });
 
       return res.json({
@@ -117,7 +120,7 @@ if (config.app.enableDebugEndpoints) {
 
   app.post("/keka/create-leave-by-email", async (req, res) => {
     try {
-      const { email, leaveTypeId, fromDate, toDate, reason, fromSession, toSession } = req.body;
+      const { email, leaveTypeId, fromDate, toDate, reason, note, fromSession, toSession } = req.body;
 
       if (!email || !leaveTypeId || !fromDate || !toDate) {
         return res.status(400).json({
@@ -133,6 +136,7 @@ if (config.app.enableDebugEndpoints) {
         fromDate,
         toDate,
         reason,
+        note,
         fromSession,
         toSession,
       });

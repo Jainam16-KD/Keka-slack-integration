@@ -212,6 +212,7 @@ async function createLeaveRequest({
   fromSession = 0,
   toSession = 1,
   reason = "",
+  note = "Applied via Slack",
 }) {
   try {
     const token = await getAccessToken();
@@ -225,7 +226,7 @@ async function createLeaveRequest({
       toSession,
       leaveTypeId,
       reason,
-      note: "Applied via Slack",
+      note,
     };
 
     const response = await axios.post(

@@ -64,6 +64,15 @@ Optional session input:
 - append one of `fullday`, `firsthalf`, `secondhalf`
 - example: `/apply-leave 2026-03-03 firsthalf`
 
+Optional leave type input:
+- use alias `sick|paid|unpaid|wfh` or explicit UUID
+- examples: `/apply-leave 2026-03-03 paid` or `/apply-leave 2026-03-03 leaveTypeId=ABBE47B9-1AEF-4364-91E9-50EAD6C22E95`
+
+Optional reason and note:
+- append reason text after date/session/type
+- add note with `note: ...`
+- example: `/apply-leave 2026-03-03 firsthalf paid Health Issue note: casual Leave`
+
 ## Endpoints
 
 - `POST /slack/commands`

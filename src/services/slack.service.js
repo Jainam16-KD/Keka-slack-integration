@@ -12,6 +12,13 @@ const SESSION_MAP = {
   secondhalf: { fromSession: 1, toSession: 1 },
 };
 
+const LEAVE_TYPE_ALIASES = {
+  sick: () => config.leaveTypes.sick,
+  paid: () => config.leaveTypes.paid,
+  unpaid: () => config.leaveTypes.unpaid,
+  wfh: () => config.leaveTypes.wfh,
+};
+
 function utcDateOnly(date = new Date()) {
   return date.toISOString().split("T")[0];
 }
@@ -39,30 +46,81 @@ function parseLeaveCommand(rawText = "") {
     fromDate: today,
     toDate: today,
     reason: rawText?.trim() || "Applied via Slack",
+    note: "Applied via Slack",
+    leaveTypeId: null,
     fromSession: SESSION_MAP.fullday.fromSession,
     toSession: SESSION_MAP.fullday.toSession,
   };
 
   if (args.length === 0) return parsed;
 
+  const consumedIndices = new Set();
   const firstDate = parseDateText(args[0]);
-  if (!firstDate) return parsed;
+  if (firstDate) {
+    parsed.fromDate = firstDate;
+    parsed.toDate = firstDate;
+    consumedIndices.add(0);
 
-  parsed.fromDate = firstDate;
-  parsed.toDate = firstDate;
-
-  if (args[1]) {
-    const secondDate = parseDateText(args[1]);
-    if (secondDate) {
-      parsed.toDate = secondDate;
+    if (args[1]) {
+      const secondDate = parseDateText(args[1]);
+      if (secondDate) {
+        parsed.toDate = secondDate;
+        consumedIndices.add(1);
+      }
     }
   }
 
-  const sessionArg = args.find((arg) => SESSION_MAP[arg.toLowerCase()]);
-  if (sessionArg) {
-    const session = SESSION_MAP[sessionArg.toLowerCase()];
+  const sessionIndex = args.findIndex((arg) => SESSION_MAP[arg.toLowerCase()]);
+  if (sessionIndex >= 0) {
+    const session = SESSION_MAP[args[sessionIndex].toLowerCase()];
     parsed.fromSession = session.fromSession;
     parsed.toSession = session.toSession;
+    consumedIndices.add(sessionIndex);
+  }
+
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const leaveTypeIndex = args.findIndex((arg) => {
+    const value = arg.toLowerCase();
+    return (
+      Object.keys(LEAVE_TYPE_ALIASES).includes(value) ||
+      value.startsWith("type=") ||
+      value.startsWith("type:") ||
+      value.startsWith("leavetypeid=") ||
+      value.startsWith("leavetypeid:") ||
+      uuidRegex.test(arg)
+    );
+  });
+
+  if (leaveTypeIndex >= 0) {
+    const rawValue = args[leaveTypeIndex];
+    const normalized = rawValue.toLowerCase();
+    const extractedValue = normalized.includes("=") || normalized.includes(":")
+      ? rawValue.split(/[=:]/).slice(1).join(":").trim()
+      : rawValue;
+    const aliasResolver = LEAVE_TYPE_ALIASES[extractedValue.toLowerCase()];
+    parsed.leaveTypeId = aliasResolver ? aliasResolver() : extractedValue;
+    consumedIndices.add(leaveTypeIndex);
+  }
+
+  const freeText = args
+    .filter((_, index) => !consumedIndices.has(index))
+    .join(" ")
+    .trim();
+
+  if (freeText) {
+    const noteMarker = /\bnote\s*:\s*/i;
+    const markerMatch = freeText.match(noteMarker);
+    if (markerMatch?.index !== undefined) {
+      const markerStart = markerMatch.index;
+      const noteStart = markerStart + markerMatch[0].length;
+      const reasonText = freeText.slice(0, markerStart).trim();
+      const noteText = freeText.slice(noteStart).trim();
+      parsed.reason = reasonText || "Applied via Slack";
+      parsed.note = noteText || "Applied via Slack";
+    } else {
+      parsed.reason = freeText;
+    }
   }
 
   return parsed;
@@ -100,7 +158,16 @@ function hasRecentApplication(cacheKey) {
   return Boolean(expiry && expiry > Date.now());
 }
 
-async function applyLeaveIfNotDuplicate({ employeeId, leaveTypeId, fromDate, toDate, fromSession, toSession, reason }) {
+async function applyLeaveIfNotDuplicate({
+  employeeId,
+  leaveTypeId,
+  fromDate,
+  toDate,
+  fromSession,
+  toSession,
+  reason,
+  note,
+}) {
   const cacheKey = makeLeaveCacheKey({
     employeeId,
     leaveTypeId,
@@ -134,6 +201,7 @@ async function applyLeaveIfNotDuplicate({ employeeId, leaveTypeId, fromDate, toD
     fromSession,
     toSession,
     reason,
+    note,
   });
 
   cacheLeaveApplication(cacheKey);
@@ -177,9 +245,8 @@ exports.handleSlashCommand = async (req, res) => {
   try {
     const email = await getUserEmail(user_id);
     const employee = await kekaService.getEmployeeByEmail(email);
-    const leaveTypeId = config.leaveTypes.sick;
-
     const parsedLeave = parseLeaveCommand(text);
+    const leaveTypeId = parsedLeave.leaveTypeId || config.leaveTypes.sick;
     const result = await applyLeaveIfNotDuplicate({
       employeeId: employee.id,
       leaveTypeId,
@@ -188,6 +255,7 @@ exports.handleSlashCommand = async (req, res) => {
       fromSession: parsedLeave.fromSession,
       toSession: parsedLeave.toSession,
       reason: parsedLeave.reason,
+      note: parsedLeave.note,
     });
 
     if (result.duplicate) {
@@ -269,6 +337,7 @@ exports.handleEvent = async (req, res) => {
       fromSession: SESSION_MAP.fullday.fromSession,
       toSession: SESSION_MAP.fullday.toSession,
       reason: "Auto-applied via Slack sick detection",
+      note: "Auto-applied via Slack sick detection",
     });
 
     if (result.duplicate) {
