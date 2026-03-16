@@ -4,6 +4,10 @@ const logger = require("../utils/logger");
 
 let cachedToken = null;
 let tokenExpiry = null;
+const LEAVE_REQUESTS_MAX_PAGES = 10;
+let cachedEmployeeDirectory = null;
+let employeeDirectoryExpiry = 0;
+const EMPLOYEE_DIRECTORY_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Get OAuth token (cached)
@@ -125,25 +129,104 @@ async function getLeaveBalance(employeeId) {
     }
 }
 
+async function getEmployeeDirectory() {
+  if (cachedEmployeeDirectory && employeeDirectoryExpiry > Date.now()) {
+    return cachedEmployeeDirectory;
+  }
+
+  const balances = await getLeaveBalance("");
+  const directory = new Map();
+
+  if (Array.isArray(balances)) {
+    for (const item of balances) {
+      const identifier = String(item.employeeIdentifier || item.employeeId || "").trim().toLowerCase();
+      if (!identifier) continue;
+      directory.set(identifier, {
+        employeeName: item.employeeName || "",
+        employeeNumber: item.employeeNumber || "",
+      });
+    }
+  }
+
+  cachedEmployeeDirectory = directory;
+  employeeDirectoryExpiry = Date.now() + EMPLOYEE_DIRECTORY_TTL_MS;
+  return directory;
+}
+
 async function getLeaveRequests(employeeId) {
-  try {
-    const token = await getAccessToken();
+  const token = await getAccessToken();
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    api_key: config.keka.apiKey,
+  };
+  const hasEmployeeFilter = Boolean(employeeId);
+  const encodedEmployeeId = hasEmployeeFilter ? encodeURIComponent(employeeId) : "";
+  const endpoints = [
+    hasEmployeeFilter
+      ? `${config.keka.baseUrl}/api/v1/time/leaverequests?employeeId=${encodedEmployeeId}`
+      : `${config.keka.baseUrl}/api/v1/time/leaverequests`,
+    `${config.keka.baseUrl}/api/v1/time/leaverequests`,
+    hasEmployeeFilter
+      ? `${config.keka.baseUrl}/api/v1/leave/requests?employeeId=${encodedEmployeeId}`
+      : `${config.keka.baseUrl}/api/v1/leave/requests`,
+  ];
 
-    const response = await axios.get(
-      `${config.keka.baseUrl}/api/v1/leave/requests?employeeId=${employeeId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          api_key: config.keka.apiKey,
-        },
+  let lastError = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      let pageUrl = endpoint;
+      let pageCount = 0;
+      let firstPayload = null;
+      const aggregated = [];
+
+      while (pageUrl && pageCount < LEAVE_REQUESTS_MAX_PAGES) {
+        const response = await axios.get(pageUrl, { headers });
+        const payload = response.data;
+        if (!firstPayload) {
+          firstPayload = payload;
+        }
+
+        if (Array.isArray(payload?.data)) {
+          aggregated.push(...payload.data);
+          pageUrl = payload.nextPage || null;
+        } else {
+          pageUrl = null;
+        }
+
+        pageCount += 1;
       }
-    );
 
-    return response.data;
+      if (firstPayload && Array.isArray(firstPayload.data)) {
+        return {
+          ...firstPayload,
+          data: aggregated,
+        };
+      }
+
+      return firstPayload;
+    } catch (error) {
+      const statusCode = error.response?.status;
+      lastError = error;
+
+      if (statusCode === 404) {
+        logger.info("Leave requests endpoint not found, trying fallback", {
+          employeeId: employeeId || null,
+          endpoint,
+        });
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  try {
+    throw lastError || new Error("No leave requests endpoint succeeded");
   } catch (error) {
     logger.error("Failed to fetch leave requests", {
-      employeeId,
+      employeeId: employeeId || null,
       error: error.response?.data || error.message,
     });
     throw new Error("Unable to fetch leave requests");
@@ -163,13 +246,23 @@ function hasMatchingLeave(records, { employeeId, leaveTypeId, fromDate, toDate }
       record.employeeId || record.employeeIdentifier || record.employee?.id || ""
     );
     const recordLeaveTypeId = String(
-      record.leaveTypeId || record.leaveType?.id || record.leaveTypeIdentifier || ""
+      record.leaveTypeId ||
+        record.leaveType?.id ||
+        record.leaveTypeIdentifier ||
+        record.selection?.[0]?.leaveTypeIdentifier ||
+        ""
     );
     const recordFromDate = toDateOnly(record.fromDate || record.startDate);
     const recordToDate = toDateOnly(record.toDate || record.endDate);
-    const recordStatus = String(record.status || "").toLowerCase();
+    const recordStatusRaw = record.status;
+    const recordStatus = String(recordStatusRaw ?? "").toLowerCase();
+    const recordStatusCode = Number(recordStatusRaw);
 
-    if (recordStatus && ["cancelled", "rejected"].includes(recordStatus)) {
+    const isCancelledOrRejected =
+      ["cancelled", "rejected"].includes(recordStatus) ||
+      (!Number.isNaN(recordStatusCode) && [2, 3].includes(recordStatusCode));
+
+    if (isCancelledOrRejected) {
       return false;
     }
 
@@ -228,7 +321,6 @@ async function createLeaveRequest({
       reason,
       note,
     };
-
     const response = await axios.post(
       `${config.keka.baseUrl}/api/v1/time/leaverequests`,
       payload,
@@ -279,6 +371,7 @@ module.exports = {
   getAccessToken,
   getEmployeeByEmail,
   getLeaveBalance,
+  getEmployeeDirectory,
   getLeaveRequests,
   hasExistingLeaveRequest,
   createLeaveRequest,
